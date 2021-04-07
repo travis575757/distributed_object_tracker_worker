@@ -7,10 +7,13 @@ import os
 import argparse
 
 import cv2
-import imagezmq
 import torch
 import numpy as np
+import zmq
+import io
+import base64
 from glob import glob
+from PIL import Image
 
 from pysot.core.config import cfg
 from pysot.models.model_builder import ModelBuilder
@@ -73,45 +76,64 @@ def main():
     # build tracker
     tracker = build_tracker(model)
 
-    first_frame = True
-    if args.video_name:
-        video_name = args.video_name.split('/')[-1].split('.')[0]
-    else:
-        video_name = 'webcam'
-    cv2.namedWindow(video_name, cv2.WND_PROP_FULLSCREEN)
+    #  Socket to talk to server
+    context = zmq.Context()
+    sub_socket = context.socket(zmq.SUB)
 
-    # image_hub = imagezmq.ImageHub()
-    for frame in get_frames(args.video_name):
-    # while True:
-        # client_name, frame = image_hub.recv_image()
-        # cv2.imshow(client_name, frame)
-        # cv2.waitKey(1)
-        # image_hub.send_reply(b'OK')
-        # continue
-        if first_frame:
-            try:
-                init_rect = cv2.selectROI(video_name, frame, False, False)
-            except:
-                exit()
-            tracker.init(frame, init_rect)
-            first_frame = False
-        else:
+    server_ip = "192.168.1.124"
+
+    # set up frame listening socket
+    sub_socket.connect("tcp://{}:5556".format(server_ip))
+    sub_socket.setsockopt_string(zmq.SUBSCRIBE, "")
+
+    # setup push socket
+    context = zmq.Context()
+    push_socket = context.socket(zmq.PUSH)
+    push_socket.connect("tcp://{}:5557".format(server_ip))
+
+    recvd_support = False
+
+    while True:
+        # wait for next message
+        md = sub_socket.recv_json()
+        if md['type'] == 'FRAME':
+            msg = sub_socket.recv()
+            buf = memoryview(msg)
+            frame = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
+
+            if not recvd_support:
+                continue
+
             outputs = tracker.track(frame)
-            if 'polygon' in outputs:
-                polygon = np.array(outputs['polygon']).astype(np.int32)
-                cv2.polylines(frame, [polygon.reshape((-1, 1, 2))],
-                              True, (0, 255, 0), 3)
-                mask = ((outputs['mask'] > cfg.TRACK.MASK_THERSHOLD) * 255)
-                mask = mask.astype(np.uint8)
-                mask = np.stack([mask, mask*255, mask]).transpose(1, 2, 0)
-                frame = cv2.addWeighted(frame, 0.77, mask, 0.23, -1)
-            else:
-                bbox = list(map(int, outputs['bbox']))
-                cv2.rectangle(frame, (bbox[0], bbox[1]),
-                              (bbox[0]+bbox[2], bbox[1]+bbox[3]),
-                              (0, 255, 0), 3)
-            cv2.imshow(video_name, frame)
-            cv2.waitKey(40)
+            bbox = list(map(int, outputs['bbox']))
+            cv2.rectangle(frame, (bbox[0], bbox[1]),
+                          (bbox[0]+bbox[2], bbox[1]+bbox[3]),
+                          (0, 255, 0), 3)
+
+            # send result
+            push_socket.send_json({"dtype": str(frame.dtype), "shape": frame.shape, "time": md['time']}, flags=zmq.SNDMORE)
+            push_socket.send(frame)
+        elif md['type'] == 'SUPPORT':
+            frame_raw = md['data']['img']  # base 64 png image
+            frame = np.array(
+                        Image.open(
+                            io.BytesIO(
+                                base64.b64decode(frame_raw)
+                            )
+                        ).convert('RGB'))[:, :, ::-1]
+            Image.open(
+                io.BytesIO(
+                    base64.b64decode(frame_raw)
+                )).save("/home/travis/output.png")
+            bbox = [int(i) for i in md['data']['bbox'].split(",")]
+            tracker.init(frame, bbox)
+            recvd_support = True
+            print('supports received, tracking will now start')
+        elif md['type'] == 'LOCATION':
+            center_pos = np.array(md['data'])
+            tracker.update(center_pos)
+        else:
+            print('Invalid message type received: {}'.format(md['type']))
 
 
 if __name__ == '__main__':
