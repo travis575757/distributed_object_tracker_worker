@@ -22,46 +22,26 @@ from pysot.tracker.tracker_builder import build_tracker
 torch.set_num_threads(1)
 
 parser = argparse.ArgumentParser(description='tracking demo')
-parser.add_argument('--config', type=str, help='config file')
-parser.add_argument('--snapshot', type=str, help='model name')
-parser.add_argument('--video_name', default='', type=str,
-                    help='videos or image files')
+parser.add_argument('--server_ip', type=str)
+parser.add_argument('--gpu_id', type=int, default=0)
 args = parser.parse_args()
 
-
-def get_frames(video_name):
-    if not video_name:
-        cap = cv2.VideoCapture(0)
-        # warmup
-        for i in range(5):
-            cap.read()
-        while True:
-            ret, frame = cap.read()
-            if ret:
-                yield frame
-            else:
-                break
-    elif video_name.endswith('avi') or \
-        video_name.endswith('mp4'):
-        cap = cv2.VideoCapture(args.video_name)
-        while True:
-            ret, frame = cap.read()
-            if ret:
-                yield frame
-            else:
-                break
-    else:
-        images = glob(os.path.join(video_name, '*.jp*'))
-        images = sorted(images,
-                        key=lambda x: int(x.split('/')[-1].split('.')[0]))
-        for img in images:
-            frame = cv2.imread(img)
-            yield frame
-
-
 def main():
+
+    torch.cuda.set_device(args.gpu_id)
+
+    model_dir = "./experiments/siamrpn_r50_l234_dwxcorr/model.pth"
+    model_config = "./experiments/siamrpn_r50_l234_dwxcorr/config.yaml"
+
+    if os.path.isfile(model_dir):
+        print("model file {} found".format(model_dir))
+    else:
+        print("model files not found, starting download".format(model_dir))
+        os.system("gdown https://drive.google.com/uc?id=1-tEtYQdT1G9kn8HsqKNDHVqjE16F8YQH")
+        os.system("mv model.pth ./experiments/siamrpn_r50_l234_dwxcorr")
+
     # load config
-    cfg.merge_from_file(args.config)
+    cfg.merge_from_file(model_config)
     cfg.CUDA = torch.cuda.is_available() and cfg.CUDA
     device = torch.device('cuda' if cfg.CUDA else 'cpu')
 
@@ -69,7 +49,7 @@ def main():
     model = ModelBuilder()
 
     # load model
-    model.load_state_dict(torch.load(args.snapshot,
+    model.load_state_dict(torch.load(model_dir,
         map_location=lambda storage, loc: storage.cpu()))
     model.eval().to(device)
 
@@ -80,16 +60,14 @@ def main():
     context = zmq.Context()
     sub_socket = context.socket(zmq.SUB)
 
-    server_ip = "192.168.1.124"
-
     # set up frame listening socket
-    sub_socket.connect("tcp://{}:5556".format(server_ip))
+    sub_socket.connect("tcp://{}:5556".format(args.server_ip))
     sub_socket.setsockopt_string(zmq.SUBSCRIBE, "")
 
     # setup push socket
     context = zmq.Context()
     push_socket = context.socket(zmq.PUSH)
-    push_socket.connect("tcp://{}:5557".format(server_ip))
+    push_socket.connect("tcp://{}:5557".format(args.server_ip))
 
     recvd_support = False
 
@@ -111,8 +89,7 @@ def main():
                           (0, 255, 0), 3)
 
             # send result
-            push_socket.send_json({"dtype": str(frame.dtype), "shape": frame.shape, "time": md['time']}, flags=zmq.SNDMORE)
-            push_socket.send(frame)
+            push_socket.send_json({"bbox": bbox, "time": md['time']})
         elif md['type'] == 'SUPPORT':
             frame_raw = md['data']['img']  # base 64 png image
             frame = np.array(
