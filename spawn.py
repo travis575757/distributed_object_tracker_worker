@@ -12,6 +12,7 @@ import numpy as np
 import zmq
 import io
 import base64
+import uuid
 from glob import glob
 from PIL import Image
 
@@ -23,8 +24,10 @@ torch.set_num_threads(1)
 
 parser = argparse.ArgumentParser(description='tracking demo')
 parser.add_argument('--server_ip', type=str)
+parser.add_argument('--id', type=str)
 parser.add_argument('--gpu_id', type=int, default=0)
 args = parser.parse_args()
+
 
 def main():
 
@@ -37,7 +40,8 @@ def main():
         print("model file {} found".format(model_dir))
     else:
         print("model files not found, starting download".format(model_dir))
-        os.system("gdown https://drive.google.com/uc?id=1-tEtYQdT1G9kn8HsqKNDHVqjE16F8YQH")
+        os.system(
+            "gdown https://drive.google.com/uc?id=1-tEtYQdT1G9kn8HsqKNDHVqjE16F8YQH")
         os.system("mv model.pth ./experiments/siamrpn_r50_l234_dwxcorr")
 
     # load config
@@ -50,29 +54,36 @@ def main():
 
     # load model
     model.load_state_dict(torch.load(model_dir,
-        map_location=lambda storage, loc: storage.cpu()))
+                                     map_location=lambda storage, loc: storage.cpu()))
     model.eval().to(device)
 
     # build tracker
     tracker = build_tracker(model)
 
-    #  Socket to talk to server
+    # Socket to talk to server
     context = zmq.Context()
     sub_socket = context.socket(zmq.SUB)
 
     # set up frame listening socket
     sub_socket.connect("tcp://{}:5556".format(args.server_ip))
-    sub_socket.setsockopt_string(zmq.SUBSCRIBE, "")
+    sub_socket.setsockopt_string(zmq.SUBSCRIBE, "frame_")
+    sub_socket.setsockopt_string(zmq.SUBSCRIBE, args.id)
 
     # setup push socket
     context = zmq.Context()
     push_socket = context.socket(zmq.PUSH)
     push_socket.connect("tcp://{}:5557".format(args.server_ip))
 
+    
+    # worker_id = uuid.uuid4()
+    # push_socket.send_json(
+    #     {"type": "REGISTER", "id": str(worker_id)})
+
     recvd_support = False
 
     while True:
         # wait for next message
+        _ = sub_socket.recv()
         md = sub_socket.recv_json()
         if md['type'] == 'FRAME':
             msg = sub_socket.recv()
@@ -89,26 +100,28 @@ def main():
                           (0, 255, 0), 3)
 
             # send result
-            push_socket.send_json({"bbox": bbox, "time": md['time']})
+            push_socket.send_json(
+                    {"type": "TRACK", "bbox": bbox, "time": md['time'], "id": args.id})
         elif md['type'] == 'SUPPORT':
             frame_raw = md['data']['img']  # base 64 png image
             frame = np.array(
-                        Image.open(
-                            io.BytesIO(
-                                base64.b64decode(frame_raw)
-                            )
-                        ).convert('RGB'))[:, :, ::-1]
-            Image.open(
-                io.BytesIO(
-                    base64.b64decode(frame_raw)
-                )).save("/home/travis/output.png")
+                Image.open(
+                    io.BytesIO(
+                        base64.b64decode(frame_raw)
+                    )
+                ).convert('RGB'))[:, :, ::-1]
             bbox = [int(i) for i in md['data']['bbox'].split(",")]
             tracker.init(frame, bbox)
+            print(bbox)
             recvd_support = True
-            print('supports received, tracking will now start')
+            print('support received, tracking will now start')
         elif md['type'] == 'LOCATION':
             center_pos = np.array(md['data'])
             tracker.update(center_pos)
+        # elif md['type'] == 'REGISTER':
+        #     print("registered worker")
+        #     push_socket.send_json(
+        #         {"type": "REGISTER", "id": str(worker_id)})
         else:
             print('Invalid message type received: {}'.format(md['type']))
 
