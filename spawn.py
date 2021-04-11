@@ -74,7 +74,6 @@ def main():
     push_socket = context.socket(zmq.PUSH)
     push_socket.connect("tcp://{}:5557".format(args.server_ip))
 
-    
     # worker_id = uuid.uuid4()
     # push_socket.send_json(
     #     {"type": "REGISTER", "id": str(worker_id)})
@@ -95,13 +94,17 @@ def main():
 
             outputs = tracker.track(frame)
             bbox = list(map(int, outputs['bbox']))
-            cv2.rectangle(frame, (bbox[0], bbox[1]),
-                          (bbox[0]+bbox[2], bbox[1]+bbox[3]),
-                          (0, 255, 0), 3)
 
             # send result
             push_socket.send_json(
-                    {"type": "TRACK", "bbox": bbox, "time": md['time'], "id": args.id})
+                {
+                    "type": "TRACK",
+                    "bbox": bbox,
+                    "score": outputs['best_score'].tolist(),
+                    "time": md['time'],
+                    "id": args.id
+                })
+            print('message: {}'.format(md['time']), end='\r')
         elif md['type'] == 'SUPPORT':
             frame_raw = md['data']['img']  # base 64 png image
             frame = np.array(
@@ -110,7 +113,7 @@ def main():
                         base64.b64decode(frame_raw)
                     )
                 ).convert('RGB'))[:, :, ::-1]
-            bbox = [int(i) for i in md['data']['bbox'].split(",")]
+            bbox = [int(float(i)) for i in md['data']['bbox'].split(",")]
             tracker.init(frame, bbox)
             print(bbox)
             recvd_support = True
