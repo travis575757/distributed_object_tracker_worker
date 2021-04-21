@@ -76,6 +76,8 @@ class SiamRPNTracker(SiameseTracker):
                                     bbox[1]+(bbox[3]-1)/2])
         self.size = np.array([bbox[2], bbox[3]])
 
+        self.init_size = self.size.copy()
+
         # calculate z crop size
         w_z = self.size[0] + cfg.TRACK.CONTEXT_AMOUNT * np.sum(self.size)
         h_z = self.size[1] + cfg.TRACK.CONTEXT_AMOUNT * np.sum(self.size)
@@ -89,6 +91,14 @@ class SiamRPNTracker(SiameseTracker):
                                     cfg.TRACK.EXEMPLAR_SIZE,
                                     s_z, self.channel_average)
         self.model.template(z_crop)
+
+    def update(self, center_pos):
+        """
+        args:
+            center_pos: (x, y) coordinates
+        """
+        self.center_pos = np.array(center_pos)
+        self.size = self.init_size.copy()
 
     def track(self, img):
         """
