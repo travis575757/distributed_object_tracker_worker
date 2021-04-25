@@ -150,6 +150,8 @@ def main():
             elif md['type'] == 'LOCATION':
                 center_pos = np.array(md['data'])
                 tracker.update(center_pos)
+            elif md['type'] == 'PING':
+                push_socket.send_json({"type": "PONG", "id": str(worker_id)})
             else:
                 print('Invalid message type received: {}'.format(md['type']))
     except KeyboardInterrupt:
