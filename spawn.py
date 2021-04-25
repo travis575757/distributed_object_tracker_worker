@@ -27,7 +27,7 @@ torch.set_num_threads(1)
 
 parser = argparse.ArgumentParser(description='tracking demo')
 parser.add_argument('--server_ip', type=str)
-parser.add_argument('--id', type=str)
+# parser.add_argument('--id', type=str)
 parser.add_argument('--gpu_id', type=int, default=0)
 args = parser.parse_args()
 
@@ -61,8 +61,8 @@ def main():
     model.eval().to(device)
 
     # create an unique identifier
-    # worker_id = uuid.uuid4()
-    worker_id = args.id
+    worker_id = uuid.uuid4()
+    # worker_id = args.id
 
     # build tracker
     tracker = build_tracker(model)
@@ -81,33 +81,31 @@ def main():
     push_socket = context.socket(zmq.PUSH)
     push_socket.connect("tcp://{}:5557".format(args.server_ip))
 
-    # # event monitoring
-    # # used to register worker once connection is established
-    # EVENT_MAP = {}
-    # for name in dir(zmq):
-    #     if name.startswith('EVENT_'):
-    #         value = getattr(zmq, name)
-    #         EVENT_MAP[value] = name
-    #
-    # # monitor thread function
-    # def event_monitor(monitor):
-    #     while monitor.poll():
-    #         evt = recv_monitor_message(monitor)
-    #         evt.update({'description': EVENT_MAP[evt['event']]})
-    #         print("Event: {}".format(evt))
-    #         sys.stdout.flush()
-    #         if evt['event'] == zmq.EVENT_HANDSHAKE_SUCCEEDED:
-    #             push_socket.send_json(
-    #                 {"type": "REGISTER", "id": str(worker_id)})
-    #         if evt['event'] == zmq.EVENT_MONITOR_STOPPED:
-    #             break
-    #     monitor.close()
-    #
-    # # register monitor
-    # monitor = sub_socket.get_monitor_socket()
-    #
-    # t = threading.Thread(target=event_monitor, args=(monitor,))
-    # t.start()
+    # event monitoring
+    # used to register worker once connection is established
+    EVENT_MAP = {}
+    for name in dir(zmq):
+        if name.startswith('EVENT_'):
+            value = getattr(zmq, name)
+            EVENT_MAP[value] = name
+
+    # monitor thread function
+    def event_monitor(monitor):
+        while monitor.poll():
+            evt = recv_monitor_message(monitor)
+            evt.update({'description': EVENT_MAP[evt['event']]})
+            if evt['event'] == zmq.EVENT_HANDSHAKE_SUCCEEDED:
+                push_socket.send_json(
+                    {"type": "REGISTER", "id": str(worker_id)})
+            if evt['event'] == zmq.EVENT_MONITOR_STOPPED:
+                break
+        monitor.close()
+
+    # register monitor
+    monitor = sub_socket.get_monitor_socket()
+
+    t = threading.Thread(target=event_monitor, args=(monitor,))
+    t.start()
 
     support = None
 
@@ -134,7 +132,7 @@ def main():
                         "bbox": bbox,
                         "score": outputs['best_score'].tolist(),
                         "time": md['time'],
-                        "id": worker_id
+                        "id": str(worker_id)
                     })
                 print('message: {}'.format(md['time']), end='\r')
             elif md['type'] == 'SUPPORT':
@@ -152,17 +150,14 @@ def main():
             elif md['type'] == 'LOCATION':
                 center_pos = np.array(md['data'])
                 tracker.update(center_pos)
-            # elif md['type'] == 'REGISTER':
-            #     print("Registered worker")
-            #     push_socket.send_json(
-            #         {"type": "REGISTER", "id": str(worker_id)})
             else:
                 print('Invalid message type received: {}'.format(md['type']))
     except KeyboardInterrupt:
-        exit(0)
         print('Exiting... notifying server of disconnect')
         push_socket.send_json(
             {"type": "FIN", "id": str(worker_id)})
+        # wait for the server to respond or let the user forcefully close
+        print("Waiting for server response. Press CTRL+C again to forcefully close")
         while True:
             _ = sub_socket.recv()
             md = sub_socket.recv_json()
