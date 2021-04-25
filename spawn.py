@@ -7,14 +7,17 @@ import os
 import argparse
 
 import cv2
+import sys
 import torch
 import numpy as np
 import zmq
 import io
 import base64
 import uuid
+import threading
 from glob import glob
 from PIL import Image
+from zmq.utils.monitor import recv_monitor_message
 
 from pysot.core.config import cfg
 from pysot.models.model_builder import ModelBuilder
@@ -57,6 +60,10 @@ def main():
                                      map_location=lambda storage, loc: storage.cpu()))
     model.eval().to(device)
 
+    # create an unique identifier
+    # worker_id = uuid.uuid4()
+    worker_id = args.id
+
     # build tracker
     tracker = build_tracker(model)
 
@@ -67,66 +74,101 @@ def main():
     # set up frame listening socket
     sub_socket.connect("tcp://{}:5556".format(args.server_ip))
     sub_socket.setsockopt_string(zmq.SUBSCRIBE, "frame_")
-    sub_socket.setsockopt_string(zmq.SUBSCRIBE, args.id)
+    sub_socket.setsockopt_string(zmq.SUBSCRIBE, str(worker_id))
 
     # setup push socket
     context = zmq.Context()
     push_socket = context.socket(zmq.PUSH)
     push_socket.connect("tcp://{}:5557".format(args.server_ip))
 
-    # worker_id = uuid.uuid4()
-    # push_socket.send_json(
-    #     {"type": "REGISTER", "id": str(worker_id)})
+    # # event monitoring
+    # # used to register worker once connection is established
+    # EVENT_MAP = {}
+    # for name in dir(zmq):
+    #     if name.startswith('EVENT_'):
+    #         value = getattr(zmq, name)
+    #         EVENT_MAP[value] = name
+    #
+    # # monitor thread function
+    # def event_monitor(monitor):
+    #     while monitor.poll():
+    #         evt = recv_monitor_message(monitor)
+    #         evt.update({'description': EVENT_MAP[evt['event']]})
+    #         print("Event: {}".format(evt))
+    #         sys.stdout.flush()
+    #         if evt['event'] == zmq.EVENT_HANDSHAKE_SUCCEEDED:
+    #             push_socket.send_json(
+    #                 {"type": "REGISTER", "id": str(worker_id)})
+    #         if evt['event'] == zmq.EVENT_MONITOR_STOPPED:
+    #             break
+    #     monitor.close()
+    #
+    # # register monitor
+    # monitor = sub_socket.get_monitor_socket()
+    #
+    # t = threading.Thread(target=event_monitor, args=(monitor,))
+    # t.start()
 
-    recvd_support = False
+    support = None
 
-    while True:
-        # wait for next message
-        _ = sub_socket.recv()
-        md = sub_socket.recv_json()
-        if md['type'] == 'FRAME':
-            msg = sub_socket.recv()
-            buf = memoryview(msg)
-            frame = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
+    try:
+        while True:
+            # wait for next message
+            _ = sub_socket.recv()
+            md = sub_socket.recv_json()
+            if md['type'] == 'FRAME':
+                msg = sub_socket.recv()
+                buf = memoryview(msg)
+                frame = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
 
-            if not recvd_support:
-                continue
+                if support is None:
+                    continue
 
-            outputs = tracker.track(frame)
-            bbox = list(map(int, outputs['bbox']))
+                outputs = tracker.track(frame)
+                bbox = list(map(int, outputs['bbox']))
 
-            # send result
-            push_socket.send_json(
-                {
-                    "type": "TRACK",
-                    "bbox": bbox,
-                    "score": outputs['best_score'].tolist(),
-                    "time": md['time'],
-                    "id": args.id
-                })
-            print('message: {}'.format(md['time']), end='\r')
-        elif md['type'] == 'SUPPORT':
-            frame_raw = md['data']['img']  # base 64 png image
-            frame = np.array(
-                Image.open(
-                    io.BytesIO(
-                        base64.b64decode(frame_raw)
-                    )
-                ).convert('RGB'))[:, :, ::-1]
-            bbox = [int(float(i)) for i in md['data']['bbox'].split(",")]
-            tracker.init(frame, bbox)
-            print(bbox)
-            recvd_support = True
-            print('support received, tracking will now start')
-        elif md['type'] == 'LOCATION':
-            center_pos = np.array(md['data'])
-            tracker.update(center_pos)
-        # elif md['type'] == 'REGISTER':
-        #     print("registered worker")
-        #     push_socket.send_json(
-        #         {"type": "REGISTER", "id": str(worker_id)})
-        else:
-            print('Invalid message type received: {}'.format(md['type']))
+                # send result
+                push_socket.send_json(
+                    {
+                        "type": "TRACK",
+                        "bbox": bbox,
+                        "score": outputs['best_score'].tolist(),
+                        "time": md['time'],
+                        "id": worker_id
+                    })
+                print('message: {}'.format(md['time']), end='\r')
+            elif md['type'] == 'SUPPORT':
+                frame_raw = md['data']['img']  # base 64 png image
+                frame = np.array(
+                    Image.open(
+                        io.BytesIO(
+                            base64.b64decode(frame_raw)
+                        )
+                    ).convert('RGB'))[:, :, ::-1]
+                bbox = [int(float(i)) for i in md['data']['bbox'].split(",")]
+                tracker.init(frame, bbox)
+                support = (frame, bbox)
+                print('Support received, tracking will now start')
+            elif md['type'] == 'LOCATION':
+                center_pos = np.array(md['data'])
+                tracker.update(center_pos)
+            # elif md['type'] == 'REGISTER':
+            #     print("Registered worker")
+            #     push_socket.send_json(
+            #         {"type": "REGISTER", "id": str(worker_id)})
+            else:
+                print('Invalid message type received: {}'.format(md['type']))
+    except KeyboardInterrupt:
+        exit(0)
+        print('Exiting... notifying server of disconnect')
+        push_socket.send_json(
+            {"type": "FIN", "id": str(worker_id)})
+        while True:
+            _ = sub_socket.recv()
+            md = sub_socket.recv_json()
+            if md['type'] == "FIN":
+                print('Server responsed, now exiting')
+                exit(0)
 
 
 if __name__ == '__main__':
