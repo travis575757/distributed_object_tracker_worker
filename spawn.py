@@ -5,12 +5,14 @@ from __future__ import unicode_literals
 
 import os
 import argparse
+import socket
 
 import cv2
 import sys
 import torch
 import numpy as np
 import zmq
+import json
 import io
 import base64
 import uuid
@@ -27,7 +29,6 @@ torch.set_num_threads(1)
 
 parser = argparse.ArgumentParser(description='tracking demo')
 parser.add_argument('--server_ip', type=str)
-# parser.add_argument('--id', type=str)
 parser.add_argument('--gpu_id', type=int, default=0)
 args = parser.parse_args()
 
@@ -117,7 +118,8 @@ def main():
             if md['type'] == 'FRAME':
                 msg = sub_socket.recv()
                 buf = memoryview(msg)
-                frame = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
+                frame = np.frombuffer(
+                    buf, dtype=md['dtype']).reshape(md['shape'])
 
                 if support is None:
                     continue
@@ -148,8 +150,10 @@ def main():
                 support = (frame, bbox)
                 print('Support received, tracking will now start')
             elif md['type'] == 'LOCATION':
-                center_pos = np.array(md['data'])
-                tracker.update(center_pos)
+                # make sure tracker has been initalized
+                if support is not None:
+                    center_pos = np.array(md['data'])
+                    tracker.update(center_pos)
             elif md['type'] == 'PING':
                 push_socket.send_json({"type": "PONG", "id": str(worker_id)})
             else:
@@ -164,7 +168,7 @@ def main():
             _ = sub_socket.recv()
             md = sub_socket.recv_json()
             if md['type'] == "FIN":
-                print('Server responsed, now exiting')
+                print('Server responded, now exiting')
                 exit(0)
 
 
