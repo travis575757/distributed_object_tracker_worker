@@ -63,7 +63,6 @@ def main():
 
     # create an unique identifier
     worker_id = uuid.uuid4()
-    # worker_id = args.id
 
     # build tracker
     tracker = build_tracker(model)
@@ -170,6 +169,9 @@ def main():
             if md['type'] == "FIN":
                 print('Server responded, now exiting')
                 exit(0)
+            elif md['type'] == "FRAME":
+                # we have to accept the incoming frame to properly accept future messages
+                msg = sub_socket.recv()
 
 
 if __name__ == '__main__':
